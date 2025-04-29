@@ -1,13 +1,15 @@
 #Solver für das c't Osterrätsel April 2025
 
-import pdb # Anweisung ist nur zum Debuggen nötig
+import pdb # Python-Debugger freischalten
 from enum import Enum, auto
-import heapq
+from heapq import heappop, heappush # Heaps
+from tempfile import SpooledTemporaryFile # Temporäre Dateien
+import pickle # Programmentitäten schreiben, lesen
 
-# Zugrichtungen
+# Rutschrichtungen
 class Dir(Enum):
 	def __str__(self):
-		""" Druckansicht ist der jeweilige reine Name """
+		""" Druckansicht ist nur der jeweilige reine Name """
 		return f"{self.name}"
 		
 	# Die Richtungen sind im Uhrzeigersinn geordnet
@@ -16,7 +18,7 @@ class Dir(Enum):
 	L = auto() # ←
 	U = auto() # ↑
 	
-# Nach welcher Regel Chilly zieht. 
+# Nach welcher Regel Chilly rutscht. 
 class Mode(Enum):
 	def __str__(self):
 		""" Druckansicht ist der jeweilige Name """
@@ -27,18 +29,27 @@ class Mode(Enum):
 	EDGES = auto() # Nicht zweimal entlang der gleichen Kante laufen
 
 
-MODE = None 	# Zugregel
-BOARD = None	# Start-Spielbrett
+MODE = None 		# Rutschregel
+BOARD = None		# Start-Spielbrett
+X-DIM = None		# Breite des Spielbretts
+Y-DIM = None 		# Höhe des Spielbretts
 CHILLY_LOC = None 	# Chillys Start-Standort
-EGGS = None		# Standorte der Eier auf dem Start-Spielbrett
-PORTALS = None 	# Von wo nach wo die Portale führen
-GRAPH = None	# Graph der prinzipiell erreichbaren Felder auf dem Spielbrett
+EXIT_LOC = None 	# End-Standort
+EGGS = None			# Standorte der Eier auf dem Start-Spielbrett
+EGG_DESTS = None 	# Zu jedem Ei,
+					#	die Zielhaltepunkte der Kanten, auf dem es liegt
+EGG_SOURCES = None 	# Zu jedem Ei, 
+					#	die Starthaltepunkte der Kanten, auf dem es liegt
+EGG_DISTANCES = None 	# Zu jedem Ei, Abstände zu den anderen Eiern
+PORTALS = None 		# Von wo nach wo die Portale führen
+NODES = None		# Graph der Haltepunkte auf dem Spielbrett
+NODE_DIST_ESTIMATES = None # Entfernungen zwischen Haltepunkten
 
 ################################################################################
 # Initialisierungen
 
 def init_game1():
-	# Chillys Zugregel
+	# Chillys Rutschregel
 	global MODE
 	MODE = Mode.EDGES
 
@@ -85,7 +96,7 @@ def init_game1():
 
 	# Lage des jeweiligen Ursprungs und des Ziels der Portale (Eislöcher)
 	# jeweils gegeben durch (x-Koo., y-Koo.) 
-	# Wenn Chilly zum Beispiel auf (0, 3) zieht, landet er auf (3, 0)
+	# Wenn Chilly zum Beispiel auf (0, 3) rutscht, landet er auf (3, 0)
 	global PORTALS
 	PORTALS =  { (4, 1): (6, 6),
 				 (6, 6): (1, 4), 
@@ -188,7 +199,7 @@ def print_board(eggs = set(), chilly_loc = (-1, -1)):
 				
 			if chilly_loc == (x, y):
 				output += "C" 	# Hier ist Chilly
-			elif (not GRAPH is None) and (x, y) in GRAPH:
+			elif (not NODES is None) and (x, y) in NODES:
 				output += "*"	# Hier ist ein möglicher Rutsch-Haltepunkt
 			else:
 				output += "_"
@@ -205,33 +216,38 @@ def pb(state):
 
 
 class State:
-	""" Zwischenstand auf der Suche nach einer längsten Zugfolge zum Einsammeln aller Eier
+	""" Zwischenstand auf der Suche nach einer längsten Rutschfolge
 	
-		Ich suche eine Zugfolge, die von Chillys Startposition ausgeht
+		Ich suche eine Folge von Rutschen, die von Chillys Startposition ausgeht
 		und eine Position erreicht, in der Chilly alle Eier eingesammelt hat.
 		Hierbei möchte ich jeden Zwischenstand nur einmal nachhalten. 
 		Als „Zwischenstand“ bezeichne ich hierbei eine Situation, die
 		Chilly genau dieselben Möglichkeiten der Weitersuche bietet, 
 		egal wann und wie Chilly diese Situation erreicht.
-		Da sich das reine Spielbrett nicht verändert, umfasst ein solcher
-		Zwischenstand die folgenden Daten:
+		Da sich das reine Spielbrett nicht verändert, definiert sich ein solcher
+		Zwischenstand durch die folgenden Daten:
 		- Chillys Standort,
-		- alle Züge bzw. Orte, die sich Chilly wegen voriger Züge verbietet
-		. die Lage der noch nicht eingesammelten Eier.
+		- alle Rutsche bzw. Standorte, die sich Chilly verbietet
+		. die noch nicht eingesammelten Eier (jew. gegeben durch ihren Standort)
+		
+		Zusätzlich halte ich für den Zwischenstand in einer Zeichenkette nach,
+		welche Rutsche nötig sind, um den Zwischenstand zu erreichen.
 	"""
 	
 	chilly_loc = None	# Chillys Standort
-	forbidden = set()	# Züge bzw. Felder, die sich Chilly verbietet
+	forbidden = set()	# Rutsche bzw. Felder, die sich Chilly verbietet
 	eggs = set()		# Lage der noch nicht eingesammelten Eier
+	access_path = None  # Rutschfolge, um nach hier zu gelangen
 	
-	def __init__(self, chilly_loc, forbidden, eggs):
+	def __init__(self, chilly_loc, forbidden, eggs, access_path = ""):
 		self.chilly_loc = chilly_loc
 		self.forbidden = forbidden
 		self.eggs = eggs
+		self.access_path = access_path
 
 
 	def __str__(self):
-		return f"State(chilly_loc = {self.chilly_loc}, forbidden = {self.forbidden}, eggs = {self.eggs})"
+		return f"State(chilly_loc = {self.chilly_loc}, forbidden = {self.forbidden}, eggs = {self.eggs}, ap = {self.access_path})"
 
 
 	def print(self):
@@ -239,414 +255,502 @@ class State:
 		
 		print(f"State(chilly_loc = {self.chilly_loc},")
 		print(f"      forbidden = {self.forbidden},")
-		print(f"      eggs = {self.eggs})")
+		print(f"      eggs = {self.eggs},")
+		print(f"      ap = {self.access_path})")
 
-	
-	def to_dict_key(self):
-		""" Den Zwischenstand so konvertieren, dass er Lexikonschlüssel sein kann.
-	
-			Klassen können keine Lexikonschlüssel sein.
-			Tupel, die Tupel und/oder 'frozenset's enthalten, können das dahingegen.
-			
-			Return - der konvertierte Zwischenstand.
-		"""
-		return (self.chilly_loc, frozenset(self.forbidden), frozenset(self.eggs))
-		
 	
 	def deepcopy(self):
 		""" Einen Zwischenstand in allen Teilen kopieren (sog. 'tiefe' Kopie)
 	
 			Return - die Kopie
 		"""
-		return State(self.chilly_loc, self.forbidden.copy(), self.eggs.copy())
+		return State(self.chilly_loc, 
+					 self.forbidden.copy(), 
+					 self.eggs.copy(), 
+					 self.access_path)
 
+	def slide(self, dir)
+		""" In die angegebene Richtung rutschen
+		
+			Return - None, wenn das nicht geht
+				   - self, in allen anderen Fällen
+		"""
+		
+		edge_data = NODES[self.chilly_loc].get(dir)
+		if edge_data is None:
+			return None # Diese Richtung ist gesperrt
+			
+		if MODE == Mode.TILES:
+			if edge_data.dest in self.forbidden:
+				return None # Hat sich Chilly verboten
+			self.forbidden += edge_data.dest
+		elif MODE == Mode.EDGES
+			new_edge = (self.chilly_loc, edge_data.dest)
+			if new_edge in forbidden:
+				return None # Hat sich Chilly verboten
+			self.forbidden += new_edge
+		self.chilly_loc = edge_data.dest
+		self.eggs -= edge_data.eggs
+		
+		return self
+		
 	
-	def one_step(self, dir):
-		""" Chilly 1 Feld weit in die übergebene Richtung ziehen
+	def can_chilly_reach(self, dests):
+		""" Ob Chilly einen Haltepunkt in 'dests' erreichen kann
+		
+			A*-Algorithmus
 			
-			dir - 	 Eine Richtung, in die Chilly gezogen werden soll
-			Return - None, wenn der Zug nicht erlaubt oder möglich ist
-			       - True, wenn Chilly anschließend stoppen muss
-			       - False, in allen anderen Fällen
+			Berücksichtigt werden nur diejenigen Verbote, die sich Chilly am
+			Anfang dieser Funktion gesetzt hat. Verbote, die sich Chilly auf
+			dem Weg zu den Ziel-Haltepunkten setzt, werden NICHT berücksichtigt.
+			Wenn diese Funktion also 'False' zurückgibt, gibt es keinen Weg
+			von Chilly zu den Ziel-Haltepunkten. Wenn sie dagegen 'True'
+			zurückgibt, kann es trotzdem sein, dass es keinen solchen Weg gibt.
+			
+			dests - eine Menge Knoten aus NODES
+			
+			Return - False, wenn kein Knoten aus 'dests' erreichbar ist.
 		"""
 		
-		# Chillys neuen Standort bestimmen
-		(current_x, current_y) = self.chilly_loc
-		match dir:
-			case Dir.R:
-				(new_x, new_y) = (current_x + 1, current_y) 
-			case Dir.D:
-				(new_x, new_y) = (current_x, current_y + 1) 
-			case Dir.L:
-				(new_x, new_y) = (current_x - 1, current_y) 
-			case Dir.U:
-				(new_x, new_y) = (current_x, current_y - 1)
-		
-		# Wenn Chilly auf der einen Seite vom Spielbrett fällt,
-		# kommt er auf der anderen Seite wieder herauf.
-		if new_x < 0:
-			new_x += X_DIM
-		elif new_x >= X_DIM:
-			new_x -= X_DIM
-		if new_y < 0:
-			new_y += Y_DIM
-		elif new_y >= Y_DIM:
-			new_y -= Y_DIM
+		for dest in dests:
+			# Gibt zum Haltepunkt 'node' an, wie lang der kürzest bekannte Weg 
+			# ist, um von Chillys Standort aus zu 'node' zu gelangen.
+			# Für Chillys Standort selbst ist das natürlich 0
+			dist_to_reach = {self.chilly_loc: 0}
 			
-		if BOARD[new_x][new_y]:
-			return None # Chilly kann nicht auf dieses Feld
-		self.chilly_loc = (new_x, new_y)
+			# Jedes Paar '(dist, node)' nennt die geschätzte Gesamtentfernung 
+			# 'dist', um von Chillys Standort über den Haltepunkt 'node' zum 
+			# Zielhaltepunkt 'dest' zu gelangen
+			# Diese Schätzung darf zu tief liegen, aber nicht zu hoch.
+			# Anfangs schätzen wir für Chillys Standort die Gesamtentfernung 0.
+			to_be_explored = [(0, self.chilly_loc)]
+
+			while to_be_explored:
+				# Wir betrachten von allen noch nicht untersuchten Orten immer
+				# diejenigen zuerst, bei dem wir die geringste Gesamtentfernung 
+				# vermuten
+				(_, current_node) = heappop(to_be_explored)
+
+				if current_node in dests:
+					return True # Suche erfolgreich
 				
-		# Ei einsammeln, wenn vorhanden
-		self.eggs.discard(self.chilly_loc)
+				dist_to_reach_successor = dist_to_reach[current_node] + 1
+				for edge_data in NODES[current_node].values():
+					successor = edge_data.dest
+					if (MODE == Mode.EDGES 
+						and (current_node, successor) in self.forbidden):
+							continue # Chilly hat sich diesen Rutsch verboten
+					elif (MODE == Mode.TILES
+						and successor in self.forbidden):
+						continue # Chilly hat sich diesen Haltepunkt verboten
+					
+					if (successor not in dist_to_reach or 
+						dist_to_reach_successor < dist_to_reach[successor]):
+						# Wir haben einen Pfad zu 'successor' gefunden 
+						# bzw. eine besseren als alle bisher bekannten. 
+						dist_to_reach[successor] = dist_to_reach_successor
+						estimate_for_total_path = \
+							dist_to_reach_successor + NODE_DIST_ESTIMATES[successor][dest]
+						heappush(to_be_explored, (estimate_for_total_path, successor))
+
+		return False  # Suche fehlgeschlagen
+
+
+	def is_dead_end(self)
+		""" Ob dieser Zwischenstand eine Sackgasse ist
 		
-		if (self.chilly_loc) == EXIT_LOC:
-			return True # Endlage erreicht
+			Die aufgeführten Tests ignorieren alle, dass sich Chilly bei seinen Wegen
+			laufend weitere Rutsche verbietet. Diejenigen Verbote, die sich Chilly jedoch
+			im jetzigen Zwischenstand schon verboten _hat_, die werden berücksichtigt.
 		
-		# Chilly durchs Portal schicken, wenn dies ansteht 
-		try:
-			self.chilly_loc = PORTALS[self.chilly_loc]
-		except KeyError:
-			return False	# Kein Portalzug
-		return True	# Portalzug
-		
-			
-	def move(self, dir, mode = MODE):
-		""" Chilly so weit wie möglich in die übergebene Richtung ziehen
-		
-			Chilly kommt dann also auf einem Haltepunkt zum Stehen.
-			
-			dir - Eine Richtung, in die Chilly gezogen werden soll
-			Return - None, wenn der Zug nicht möglich ist
-				   - True, in allen anderen Fällen
+			Return - True, dann wenn dieser Zwischenstand garantiert nicht zu einem gültigen
+					 Endstand führen kann.
 		"""
+
+		eggs_left = len(self.eggs)
+		if (eggs_left == 0):
+			# Chilly muss heraus können. Mehr ist nicht zu testen
+			return not self.can_chilly_reach({ EXIT_LOC }):
+		
+		# Chilly muss jedes verbliebene Ei erreichen können.
+		for egg in self.eggs:
+			if not self.can_chilly_reach(EGG_SOURCES[egg])
+				return True
+				
+		# Eine Kopie, die ich modifizieren kann, ohne 'self' zu überschreiben
+		copy = self.deepcopy()
+		
+		# Chilly muss von jedem verbliebenen Ei aus zum Ausgang können.
+		for egg in self.eggs:
+			copy.chilly_pos = EGG_DESTS[egg]
+			if not copy.can_chilly_reach({ EXIT_LOC })
+				return True
+		
+		if (eggs_left <= 1)
+			# Mehr wüsste ich nicht, was getestet werden kann.
+			return False
+			
+		# Es sind also noch mindestens 2 Eier einzusammeln.
+		# Alle möglichen Kombinationen will ich nicht ausprobieren.
+		# Vertretungsweise nehme ich die beiden verbliebenen Eier,
+		# die am meisten voneinander entfernt sind, und teste, 
+		# ob Chilly von einem Ei zum anderen findet
+		
+		# Bestimme die beiden Eier
+		(best_dist, best_pair) = (-1, None)
+		for egg1 in eggs:
+			for egg2 in eggs:
+				dist = EGG_DISTANCES[egg1][egg2]
+				if (dist > best_dist):
+					(best_dist, best_pair) = (dist, (egg1, egg2))
+		
+		# Kann Chilly von einem Ei zum anderen?
+		second_egg_reachable = False
+		for (egg1, egg2) in [ best_pair, best_pair[::-1] ]:
+			for node in EGG_DESTS[egg1]:
+				copy.chilly_loc = node
+				if copy.can_chilly_reach(EGG_SOURCES[egg2])
+					second_egg_reachable = True
+					break
+			if second_egg_reachable:
+				break
+		return not second_egg_reachable
+
+
+class SlideData:
+	""" Eigenschaften der Kante im Graph der Haltepunkte """
+	
+	dest: None # Zu welchem Haltepunkt die Kante führt
+	eggs: None # Eier, die auf dem Weg eingesammelt werden
+	
+	def __init__(dest, dir, eggs = set()):
+		self.dest = dest
+		self.eggs = eggs
+
+
+	def __str__(self):
+		return f"SlideData(dest = {self.dest}, eggs = {self.eggs})"
+
+
+	def print(self):
+		""" Ausdruck des Objekts """
+		
+		print(f"SlideData(dest = {self.dest},")
+		print(f"         eggs = {self.eggs})")
+		
+################################################################################
+
+def board_one_step(coo_x, coo_y, dir):
+	""" Chilly 1 Feld weit in die übergebene Richtung ziehen
+		
+		dir - 	 Eine Richtung, in die Chilly gezogen werden soll
+		Return - None, 							wenn der Schritt unmöglich ist
+				 (coo_x, coo_y, eggs, do_halt), in allen anderen Fällen
+					coo_x, coo_y 	- Chillys neue Koordinaten
+					eggs			- die hier liegenden Eier
+					do_halt 		- Ob ein Rutsch hiermit beendet ist
+	"""
+	
+	# Chillys neuen Standort bestimmen
+	match dir:
+		case Dir.R:
+			(coo_x, coo_y) = (coo_x + 1, coo_y) 
+		case Dir.D:
+			(coo_x, coo_y) = (coo_x, coo_y + 1) 
+		case Dir.L:
+			(coo_x, coo_y) = (coo_x - 1, coo_y) 
+		case Dir.U:
+			(coo_x, coo_y) = (coo_x, coo_y - 1)
+	
+	# Wenn Chilly auf der einen Seite vom Spielbrett fällt,
+	# kommt er auf der anderen Seite wieder herauf.
+	if coo_x < 0:
+		coo_x += X_DIM
+	elif coo_x >= X_DIM:
+		coo_x -= X_DIM
+	if coo_y < 0:
+		coo_y += Y_DIM
+	elif coo_y >= Y_DIM:
+		coo_y -= Y_DIM
+		
+	if BOARD[coo_x][coo_y]:
+		return None # Chilly kann nicht auf dieses Feld
+	
+	eggs = set()
+	if (coo_x, coo_y) in EGGS
+		eggs += (coo_x, coo_y)
+	
+	if (self.chilly_loc) == EXIT_LOC:
+		return (coo_x, coo_y, eggs, True) # Endlage erreicht
+	
+	# Chilly durchs Portal schicken, wenn er draufsteht
+	try:
+		(coo_x, coo_y) = PORTALS[(coo_x, coo_y)]
+	except KeyError:
+		return (coo_x, coo_y, eggs, False)	# Kein Portal
+		
+	if (coo_x, coo_y) in EGGS
+		eggs += (coo_x, coo_y)
+	return (coo_x, coo_y, eggs, True) # Portalrutsch
+
+
+def board_slide(coo_x, coo_y, dir):
+	""" Chilly in die übergebene Richtung rutschen
+	
+		Chilly kommt dann also auf einem Haltepunkt zum Stehen.
+		(coo_x, coo_y) 	- Chillys Standort
+		dir - Eine Richtung, in die Chilly gezogen werden soll
+		Return - None, 						wenn der Rutsch unmöglich ist
+				 (coo_x, coo_y, collected), in allen anderen Fällen
+					- (coo_x, coo_y) - Chillys neuer Standort
+					- collected		 - Menge der eingesammelten Eier
+"""
 		
 		# Erster Schritt
-		start_loc = self.chilly_loc
-		outcome = self.one_step(dir)
+		outcome = board_one_step(coo_x, coo_y, dir)
 		if outcome is None:
-			return None # Dieser Zug war nicht möglich
+			return None # Dieser Rutsch war nicht möglich
+		(coo_x, coo_y, collected , do_halt) = outcome
 		
 		# Weitere Schritte in die gleiche Richtung
-		while outcome == False:
-			outcome = self.one_step(dir)
-			
-		if MODE == Mode.TILES: 
-			if outcome == True:
-				# Chilly ist durch ein Portal gegangen. 
-				# Dann ist weder der Portal-Ursprung gesperrt 
-				# (weil das kein Haltepunkt ist laut Aufgabenstellung) 
-				# noch der Zielpunkt des Portals
-				# (weil Chilly nicht ihn, sondern den Ursprung "ansteuert")
-				pass
-			elif self.chilly_loc in self.forbidden:
-				return None # Hier war Chilly schon
-			else:
-				# Hierhin will Chilly nie wieder ziehen
-				self.forbidden.add(self.chilly_loc)
-		elif MODE == Mode.EDGES: 
-			# Chilly ist also von 'start_loc' nach 'self.chilly_loc' gezogen.
-			# Diesen Weg darf Chilly vorher noch nicht gezogen sein
-			current_edge = (start_loc, self.chilly_loc)
-			if current_edge in self.forbidden:
-				return None
-			# Diesen Weg will Chilly nie wieder nehmen
-			self.forbidden.add(current_edge)
-		return False
-
-
-	def get_near_nodes(self, loc):
-		""" Haltepunkte, die von 'loc' aus in gerader Linie mit einem Zug erreichbar sind
-		"""
-		
-		# Schleifenkörper, wird für verschiedene Schleifen durchlaufen, s.u.
-		def do_loop_body(x, y):
-			nonlocal nodes
-			if BOARD[x][y]:
-				return True	# Feld kann nicht betreten werden, Schleifenabbruch
-			if not (x, y) in GRAPH:
-				return False # Kein Haltepunkt, Weiter
-			if MODE == Mode.TILES and (x,y) in self.forbidden: 
-				return False # Verbotener Haltepunkt, Weiter
-			nodes.add((x, y))
-			return False
-		
-		# Die nahe gelegenen Haltepunkte sammeln
-		nodes = set()
-		
-		(loc_x, loc_y) = loc
-		for x in range(loc_x, X_DIM):
-			if do_loop_body(x, loc_y):
-				break # Erstes nicht betretbare Feld erreicht
-		for x in range(loc_x - 1, -1, -1):
-			if do_loop_body(x, loc_y):
+		while not do_halt:
+			outcome = board_one_step(coo_x, coo_y, dir)
+			if outcome is None: # geht nicht
 				break
-		for y in range(loc_y, Y_DIM):
-			if do_loop_body(loc_x, y):
-				break
-		for y in range(loc_y - 1, -1, -1):
-			if do_loop_body(loc_x, y):
-				break
-		return nodes
-			
-
-	def does_path_exist(self, to_nodes):
-		""" Ob es einen Pfad von Chillys Standort zu den Haltepunkten 'to_nodes' gibt
+			(coo_x, coo_y, eggs, do_halt) = outcome
+			collected += eggs
 		
-			Dijkstras Algo
-			
-			Es werden nur diejenigen verbotenen Züge berücksichtigt, die
-			schon am Anfang der Routine verboten waren. Wenn die Routine also
-			'False' zurückgibt, dann stimmt das, aber wenn sie 'True'
-			zurückgibt, kann es in Wirklichkeit doch keinen solchen Pfad geben.
-			Diese Unschärfe nehme ich inkauf.
-			
-			from-node - Haltepunkt aus 'GRAPH'
-			to-nodes - Menge von Haltepunkteb 
-			Return - 'False' dann, wenn es keinen solchen Pfad gibt
-		"""
-		
-		# Wenn es keine Ziel-Standorte gibt, sind sie alle erreichbar.
-		if not to_nodes:
-			return True
-			
-		# Jedem Haltepunkt die bisher bekannte kürzeste Distanz vom 
-		# Startpunkt zuweisen. Die Distanz wird in Zügen gerechnet
-		# Anfangs ist das beim Startpunkt 0, bei allen anderen 'unendlich'
-		distances = { node: float('inf') for node in GRAPH }
-		distances[self.chilly_loc] = 0
-		
-		# Haltepunkte, die noch untersucht werden müssen, geordnet nach 
-		# bisher bekannter kürzester Distanz vom Startpunkt
-		# Anfangs ist das nur der Startpunkt
-		unexplored = [(0, self.chilly_loc)]
-		
-		while unexplored:
-			(current_distance, current_node) = heapq.heappop(unexplored)
-			
-			if current_node in to_nodes:
-				return True # Ein Zielhaltepunkt ist erreicht, also erreichbar
-			
-			if current_distance > distances[current_node]:
-				# Ein kürzerer Pfad hierher ist schon bekannt,
-				# also brauchen wir diesen nicht weiter zu verfolgen
-				continue 
-			
-			# Distanz vom Startpunkt, wenn wir über den aktuellen 
-			# Haltepunkt zu einem seiner Nachfolger gehen 
-			new_distance = current_distance + 1
-			for successor in GRAPH[current_node]:
-				if (MODE == Mode.EDGES 
-					and (current_node, successor) in self.forbidden):
-					continue # Chilly hat sich diesen Rutsch verboten
-				elif (MODE == Mode.TILES
-					and successor in self.forbidden):
-					continue # Chilly hat sich diesen Nachfolger verboten
-				
-				if new_distance >= distances[successor]:
-					# Über aktuellen Haltepunkt zu gehen, ist nicht kürzer 
-					# als der bisher bekannte kürzeste Weg
-					continue
-				
-				# Aktualisiere die bekannte kürzeste Distanz
-				distances[successor] = new_distance
-				# Diesen Nachfolger müssen wir noch untersuchen
-				heapq.heappush(unexplored, (new_distance, successor))
-		
-		# Alle Möglichkeiten erschöpft, einen Pfad gibt es anscheinend nicht.
-		return False
-
-################################################################################
+		return (coo_x, coo_y, collected)
+	
 
 def construct_graph():
 	""" Den Graph der prinzipiell erreichbaren Haltepunkte aufbauen
 	
-		'B in graph[A]', das bedeutet: Von Haltepunkt A aus
-		kann man direkt (in _einem_ Zug) zu Haltepunkt B gelangen
-		Ob sich Chilly hierbei einen Zug "verboten" hat, wird in diesem
-		Graphen außer Acht gelassen.
+		'nodes[A][dir] == SlideData(B, eggs)', das bedeutet: 
+		Von Haltepunkt 'A' aus kann man in Richtung 'dir' direkt zu 
+		Haltepunkt 'B' rutschen. Hierbei begegnet man den Eiern in
+		'eggs'. Ob sich Chilly hierbei einen Rutsch "verboten" hat,
+		wird in diesem Graphen außer Acht gelassen.
 		
-		>==> In dieser Routine entspricht jeder Zwischenstand einem Haltepunkt
-
 		Return - Graph der Haltepunkte
 	"""
+
+	# Anfangs bekannt ist der Zielpunkt des Spielbretts.
+	# Von dort aus geht es nur hinaus, es gibt also keine abgehenden Kanten
+	nodes = { EXIT_LOC: dict() }
 	
-	# Anfangs bekannt ist der Anfangs- und Zielpunkt des Spielbretts 
-	graph = { CHILLY_LOC: set(), EXIT_LOC: set() }
-	
-	# Anfangsstand. Zum Aufbau, siehe die Klassendefinition von 'State'
-	# Anfangs müssen wir den Anfangspunkt des Spielbretts untersuchen
-	init_state = State(CHILLY_LOC, set(), set())
-	
-	# Liste der Zwischenstände, die noch untersucht werden müssen
-	unexplored = [ init_state ]
+	# Liste der Haltepunkte, die noch untersucht werden müssen
+	unexplored = [ CHILLY_LOC ]
 	
 	while unexplored:
-		current_state = unexplored.pop();
-		node = current_state.chilly_loc
-		
-		if node == EXIT_LOC:
-		    continue # von hier aus geht's nur raus
-		
-		# Alle Zugmöglichkeiten von diesem Zwischenstand aus durchgehen 
+		node = unexplored.pop();
+		if not node in nodes:
+				nodes[node] = dict()
+			
 		for dir in Dir:
-			# Eine schlichte Zuweisung des aktuellen Zwischenstands
-			# an den neuen reicht hier nicht.
-			# Der neue Zwischenstand muss eine _Kopie_ des aktuellen sein,
-			# weil 'move()' den neuen Zwischenstand verändert
-			# und der aktuelle dabei _nicht_ mitverändert werden darf.
-			new_state = current_state.deepcopy();
-			result = new_state.move(dir, Mode.NONE);
-			if result is None: 
-				continue # In diese Richtung zu ziehen, ist nicht möglich
-			new_node = new_state.chilly_loc
-			
-			if not new_node in graph:
-				graph[new_node] = set()
-				# Diesen Ort kennen wir bisher nicht, wir werden ihn noch 
-				# untersuchen müssen
-				unexplored.append(new_state)
-			
-			graph[node].add(new_node)
+			# Auf dem Spielbrett in Richtung 'dir' rutschen
+			outcome = board_slide(*node, dir)
+			if outcome is None:
+				continue # In diese Richtung kann nicht gerutscht werden
+			(coo_x, coo_y, eggs) = outcome
+			nodes[node][dir] = SlideData(dest = (coo_x, coo_y), eggs = eggs)
+			if not dest in nodes:
+				# Neuer Haltepunkt gefunden. 
+				# Dieser Haltepunkt muss noch untersucht werden.
+				unexplored += dest
+			for egg in eggs:
+				if not egg in egg_sources:
+					egg_sources[egg] = set()
+				egg_sources[egg] += dest
+				if not egg in egg_dests:
+					egg_dests[egg] = set()
+				egg_dests[egg] += dest
+				
+	return (nodes, egg_sources, egg_dests)
+
+
+def dijkstra(start):
+	""" Berechnet zu jedem Haltepunkt die Entfernung vom Startpunkt zu ihm
 		
-	return graph
+		Dijkstras Algo
+		
+		start - der Startpunkt
+	"""
+	
+	# Jedem Haltepunkt die bisher bekannte kürzeste Entfernung vom 
+	# Startpunkt zuweisen. Die Entfernung wird in Rutschen gerechnet
+	# Anfangs ist das beim Startpunkt 0, bei allen anderen 'unendlich'
+	node_distances = { n : float('inf') for n in NODES }
+	node_distances[start] = 0
+	
+	# Haltepunkte, die noch untersucht werden müssen, geordnet nach 
+	# bisher bekannter kürzester Entfernung vom Startpunkt
+	# Anfangs ist das nur der Startpunkt
+	unexplored = [(0, start)]
+	
+	while unexplored:
+		(current_distance, current_node) = heappop(unexplored)
+		
+		if current_distance > node_distances[current_node]:
+			# Ein kürzerer Weg hierher ist schon bekannt,
+			# also brauchen wir diesen nicht weiter zu verfolgen
+			continue 
+		
+		# Entfernung vom Startpunkt, wenn wir über den aktuellen 
+		# Haltepunkt zu einem seiner Nachfolger gehen 
+		new_distance = current_distance + 1
+		for edge_data in NODES[current_node]:
+			successor = edge_data.dest
+			if new_distance < node_distances[successor]:
+				# Aktualisiere die bekannte kürzeste Entfernung
+				node_distances[successor] = new_distance
+				# Diesen Nachfolger müssen wir noch untersuchen
+				heappush(unexplored, (new_distance, successor))
+	
+	return node_distances
+
+
+def calc_dist_estimates()
+	""" Schätzwerte für den Abstand zu Haltepunkten und Eiern berechnen
+	
+		Die Schätzwerte wären exakt ohne dasjenige, was sich Chilly 
+		verbietet - so aber UNTERschätzen sie die tatsächlichen Abstände
+	"""
+	
+	node_dist_estimates = dict()
+	
+	for node in NODES
+		node_dist_estimates[node] = dijkstra(node)
+	return node_dist_estimates
+
+
+def calc_egg_distances():
+	""" Berechne, wie weit Eier auseinander liegen """
+	
+	egg_dists = dict()
+	
+	for egg_from in EGGS:
+		egg_dists[egg_from] = dict()
+		for egg_to in EGGS:
+			if egg_to == egg_from:
+				egg_dists[egg_from][egg_to] = 0 
+				continue
+			best_dist = float('inf')
+			for node_from in EGG_DESTS[egg_from]:
+				for node_to in EGG_SOURCES[egg_to]:
+					if NODE_DIST_ESTIMATES[node_from][node_to] < best_dist:
+						best_dist = NODE_DIST_ESTIMATES[node_from][node_to]
+			egg_dists[egg_from][egg_to] = best_dist
+			
+	return egg_dists
 
 
 def search_solution():
-	""" Systematisch nach nach längsten Zugfolgen suchen
+	""" Systematisch nach Rutschfolgen suchen, die Chilly zum Ausgang führen
 	
-		Return - None, wenn es keine solche Zugfolge gibt
-		       - die längste gefundene Zugfolge, in allen anderen Fällen 
+		Breitensuche über die Anzahl der Rutsche der jew. Folge
+	
+		Return - None, wenn es keine solche Rutschfolge gibt
+		       - die längste gefundene Rutschfolge, in allen anderen Fällen 
 	"""
 	
-	# Anfangsstand. Zum Aufbau, siehe die Klassendefinition von 'State'
-	init_state = State(CHILLY_LOC, set(), EGGS)
-	
-	# Lexikon der bisher gefundenen Zwischenstände
-	# Zu jedem Zwischenstand will ich als Info nachhalten,
-	# 	- wie viele Züge der bisher längste Weg hat, der hierhin geführt hat
-	# 	- welche Richtung Chilly zuletzt genommen hat, um zu diesem
-	#   		Zwischenstand auf dem längsten Weg zu gelangen
-	#   - von welchem Zwischenstand Chilly zuletzt kam
-	# In diesem Lexikon würden Zwischenstände die Schlüssel der 
-	# Einträge bilden, wenn denn Python erlauben würde, dass Objekte 
-	# Lexikon-Schlüssel sind. Erlaubt Python aber nicht.
-	# Daher wird vor dem Eintragen oder Nachschlagen im Lexikon jeder 
-	# Zwischenstand in eine Form gebracht, die ein Lexikon-Schlüssel sein kann.
-	state_data = { init_state.to_dict_key() : (0, None, None) }
-	
-	# Alle noch nicht untersuchten Zwischenstände
-	# Am Anfang der Suche ist das nur der Anfangsstand
-	unexplored = [ init_state ]
-	
-	# Der Endstand mit der längsten Anzahl an Zügen
-	# Am Anfang der Suche gibt es noch keinen. 
+	# Eine Zeichenkette, die angibt, wie man zu einem "gewinnenden" Endstand kommt.
 	best_winner_so_far = None
-	best_winner_move_count_so_far = -1
 	
-	while unexplored:
-		current_state = unexplored.pop();
-		current_state_key = current_state.to_dict_key()
-		# Länge des bisher längsten Wegs zum aktuellen Zwischenstand
-		current_move_count = state_data[current_state_key][0]
-		
-		if current_state.chilly_loc == EXIT_LOC:
-			# Dieser Zwischenstand ist ein Endstand 
-			if current_state.eggs:
-				# Keine Lösung: Nicht alle Eier eingesammelt
-				continue
-			if current_move_count > best_winner_move_count_so_far:
-				# Bessere Zugfolge gefunden als bisher bekannt.
-				best_winner_so_far = current_state
-				best_winner_move_count_so_far = current_move_count
-			continue
-		
-		
-		# Generell ist es beim Durchkämmen von Suchräumen wichtig,
-		# Zwischenstände so früh wie möglich auszuscheiden, 
-		# wenn klar und sicher ist, dass sie nicht mehr zum Ziel 
-		# führen können. Ansonsten verschwendet das Programm viel 
-		# Aufwand mit dem Ausforschen von Sackgassen.
-		# Den aktuellen Zwischenstand können wir ausscheiden, 
-		# wenn es keinen Weg mehr von Chilly zum Endpunkt gibt
-		if not current_state.does_path_exist({ EXIT_LOC }):
-			continue
-					
-		# Diesen Zwischenstand können wir auch ausscheiden, wenn es
-		# keinen Weg von Chilly zu jedem verbliebenen Ei mehr gibt.
-		# Eier liegen nicht immer auf Haltepunkten, ersatzweise
-		# bestimme ich dann alle Haltepunkte, die vom jeweiligen Ei
-		# aus in gerader Linie erreichbar sind. Um das jeweilige Ei 
-		# zu erreichen, muss Chilly nämlich einen solchen Haltepunkt
-		# passieren. Dieses Ersatzkriterium ist zwar eine Unschärfe, 
-		# aber die nehme ich inkauf.
-		reached_dead_end = False
-		for egg in current_state.eggs:
-			near_nodes = ( { egg } if egg in GRAPH 
-						   else current_state.get_near_nodes(egg) )
-			if not current_state.does_path_exist(near_nodes):
-				reached_dead_end = True
-				break
-		if reached_dead_end:
-			continue
-				
-		# Alle Zugmöglichkeiten von diesem Zwischenstand aus durchgehen 
-		new_move_count = current_move_count + 1
-		for dir in Dir:
-			# Eine schlichte Zuweisung des aktuellen Zwischenstands
-			# an den neuen reicht hier nicht.
-			# Der neue Zwischenstand muss eine _Kopie_ des aktuellen sein,
-			# weil 'move()' den neuen Zwischenstand verändert
-			# und der aktuelle dabei _nicht_ mitverändert werden darf.
-			new_state = current_state.deepcopy();
-			result = new_state.move(dir);
-			if result is None: 
-				continue # In diese Richtung zu ziehen, ist nicht möglich
+	# Anfangsstand. Zum Aufbau, siehe die Klassendefinition von 'State'
+	init_state = State(CHILLY_LOC, set(), EGGS, "")
+	
+	with SpooledTemporaryFile(max_size=2**30 - 1, mode='w+b', dir="G:\\Temp\\") as fp1:
+		with SpooledTemporaryFile(max_size=2**30 - 1, mode='w+b', dir="G:\\Temp\\") as fp2:
+			fp_in = fp1
+			fp_out = fp2
 			
-			# Wie lang war der bisher gefundene längste Weg zum 
-			# neuen Zwischenstand
-			new_state_key = new_state.to_dict_key();
+			# Erster abzuarbeitender Zwischenstand ist der Anfangsstand
 			try:
-				cached_count = 	state_data[new_state_key][0]
-			except KeyError:
-				# Diesen Zwischenstand haben wir bis jetzt noch nie gesehen.
-				# Wir werden ihn später untersuchen müssen.
-				unexplored.append(new_state)
-				# Die 'bisher bekannte' längste Anzahl Züge auf einen so 
-				# kleinen Wert setzen, dass der neu berechnete Wert 
-				# auf jeden Fall höher sein muss 
-				cached_count = -1
-			
-			if cached_count < new_move_count:
-				state_data[new_state_key] = (new_move_count, dir, current_state_key)
+				pickle.dump(init_state, fp_out) 
+			except OSError as e:
+				# Datei-Überlauf, jetzt schon?! Weitermachen zwecklos
+				exit(f"Fatal: 'pickle.dump()' scheiterte: {e}")
+						
+			# Im Folgenden wird die Datei 'fp_in' immer wieder durchlaufen
+			# und die Zwischenstände, die in ihr enthalten sind, abgearbeitet.
+			# Alle Zwischenstände, die hierbei neu gefunden werden,
+			# werden in die Datei 'fp_out' geschrieben. 
+			# Wenn die Datei 'fp_in' jeweils vollständig durchlaufen ist 
+			# und sich herausstellt, dass Zwischenstände in 'fp_out' stehen
+			# dann werden die Rollen von 'fp_in' und 'fp_out' getauscht und
+			# die (jetzige) Datei 'fp_out' gelöscht.
+			# Das geht solange, bis alle Zustände vollständig abgearbeitet
+			# und hierbei keine neuen Zustände gefunden worden sind
+			slides = 0 # Wieviele Rutsche die derzeitigen Zwischenstände umfassen
+			states = 0 # Wieviele Zwischenstände in der aktuellen Datei waren
+			rejected = 0 # Wieviele Zwischenstände als Sackgassen verworfen wurden
+			while True: 
+				try: 
+					current_state = pickle.load(fp_in)
+				except EOFError:
+					# Ggf. gepufferte Ausgaben wegschreiben
+					fp_out.flush()
+					if fp_out.tell() == 0:
+						# Fertig: es gibt keine abzuarbeitende Zwischenstände mehr
+						fp_in = None
+						fp_out = None
+						break
+					(fp_out, fp_in) = (fp_in, fp_out)
+					fp_in.seek(0)
+					fp_out.seek(0)
+					fp_out.truncate(0)
+					logmsg = f"# slides: {slides}, states: {states}, rejected: {rejected}, winner: {best_winner_so_far}"
+					with open("c:\\temp\\log.txt", "a") as log:
+						print(logmsg, file = log)
+					print(logmsg)
+					slides += 1
+					states = 0
+					rejected = 0
+					continue
+					
+				if current_state.chilly_loc == EXIT_LOC:
+					# Dieser Zwischenstand ist ein Endstand.
+					# Nur Endstände, bei denen alle Eier eingesammelt sind, zählen.
+					if not current_state.eggs:
+						best_winner_so_far = current_state.access_path
+					continue
+				
+				# Beim Durchkämmen von Suchräumen ist es entscheidend wichtig,
+				# Zwischenstände so früh wie möglich auszuscheiden, 
+				# sobald klar und sicher ist, dass sie nicht mehr zum Ziel 
+				# führen können. Ansonsten verschwendet das Programm viel 
+				# Aufwand mit dem Ausforschen von Sackgassen.
+				if current_state.is_dead_end():
+					rejected += 1
+					continue		
+						
+				# Alle Rutschmöglichkeiten von diesem Zwischenstand aus durchgehen 
+				for dir in Dir:
+					# Eine schlichte Zuweisung des aktuellen Zwischenstands
+					# an den neuen reicht hier nicht.
+					# Der neue Zwischenstand muss eine _Kopie_ des aktuellen sein,
+					# weil 'slide()' den neuen Zwischenstand verändert
+					# und der aktuelle dabei _nicht_ mitverändert werden darf.
+					new_state = current_state.deepcopy();
+					result = new_state.slide(dir);
+					if result is None: 
+						continue # In diese Richtung zu rutschen, ist nicht möglich
+						
+					# Dieser Zwischenstand ist neu, wir können ihn nicht schon
+					# mal angetroffen haben. Denn wir arbeiten alle Zwischenstände
+					# nacheinander ab, die durch eine gewisse Länge an Rutschen 
+					# erreichbar sind. Der neue Zwischenstand hat einen Rutsch mehr.
+					states += 1
+					try:
+						pickle.dump(new_state, fp_out)
+					except OSError as e:
+						# Die Datei zum Aufnehmen der noch zu bearbeitenden
+						# Zwischenstände ist übergelaufen. Weitermachen zwecklos
+						exit(f"Fatal: 'pickle.dump()' scheiterte: {e}")
 		
-	# Alle Zwischenstände sind jetzt abgearbeitet
-	if best_winner_so_far is None:
-		return None # Es gibt keine Zugfolge zum Ziel
-		
-	# Die Züge vom Gewinner bis zum Anfangsstand rückverfolgen
-	# 'state_data[A] == (_, dir, B)', das bedeutet:
-	# Wenn man aus B kommt und in Richtung dir zieht, gelangt man nach A
-	state_key = best_winner_so_far.to_dict_key()
-	moves = "" # sammelt die Zugrichtungen auf
-	while True:
-		(count, dir, state_key) = state_data[state_key]
-		if count == 0:
-			break; # Anfangsstand erreicht
-		moves = f"{dir}{moves}"
-		(cl, f, e) = state_key
-		s = State(cl, f, e)
-		reached_dead_end = False
-		for egg in s.eggs:
-			near_nodes = ( { egg } if egg in GRAPH 
-						   else s.get_near_nodes(egg) )
-			if not s.does_path_exist(near_nodes):
-				reached_dead_end = True
-				print (cl, f, e, f"NICHT ERREICHBAR: {egg}")
-				break
-		
-		
-	return moves
+	# Alle Zwischenstände sind jetzt abgearbeitet.
+	return best_winner_so_far
 	
 ################################################################################
 ################################################################################
@@ -657,14 +761,18 @@ def search_solution():
 #init_game2()	# Level 2
 init_game3()	# Level 3
 
-breakpoint()
-GRAPH = construct_graph()
+(NODES, EGG_SOURCES, EGG_DESTS) = construct_graph()
 print_board(EGGS, CHILLY_LOC)
+breakpoint()
+
+NODE_DIST_ESTIMATES = calc_dist_estimates()
+EGG_DISTANCES = calc_egg_distances()
+
 SOLUTION = search_solution()
 
 if SOLUTION is None:
 	print("🐧 Chilly schmollt. Er konnte keine Lösung bestimmen")
 else:
-	print(f"🐧 Chilly fand eine Lösung mit {len(SOLUTION)} Zügen.");
+	print(f"🐧 Chilly fand eine Lösung mit {len(SOLUTION)} Rutschen.");
 	print(f"Sie lautet: {SOLUTION}")
 	
