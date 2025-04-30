@@ -31,8 +31,8 @@ class Mode(Enum):
 
 MODE = None 		# Rutschregel
 BOARD = None		# Start-Spielbrett
-X-DIM = None		# Breite des Spielbretts
-Y-DIM = None 		# Höhe des Spielbretts
+X_DIM = None		# Breite des Spielbretts
+Y_DIM = None 		# Höhe des Spielbretts
 CHILLY_LOC = None 	# Chillys Start-Standort
 EXIT_LOC = None 	# End-Standort
 EGGS = None			# Standorte der Eier auf dem Start-Spielbrett
@@ -269,7 +269,8 @@ class State:
 					 self.eggs.copy(), 
 					 self.access_path)
 
-	def slide(self, dir)
+
+	def slide(self, dir):
 		""" In die angegebene Richtung rutschen
 		
 			Return - None, wenn das nicht geht
@@ -283,14 +284,15 @@ class State:
 		if MODE == Mode.TILES:
 			if edge_data.dest in self.forbidden:
 				return None # Hat sich Chilly verboten
-			self.forbidden += edge_data.dest
-		elif MODE == Mode.EDGES
+			self.forbidden.add(edge_data.dest)
+		elif MODE == Mode.EDGES:
 			new_edge = (self.chilly_loc, edge_data.dest)
-			if new_edge in forbidden:
+			if new_edge in self.forbidden:
 				return None # Hat sich Chilly verboten
-			self.forbidden += new_edge
+			self.forbidden.add(new_edge)
 		self.chilly_loc = edge_data.dest
 		self.eggs -= edge_data.eggs
+		self.access_path += str(dir)
 		
 		return self
 		
@@ -348,6 +350,8 @@ class State:
 						dist_to_reach_successor < dist_to_reach[successor]):
 						# Wir haben einen Pfad zu 'successor' gefunden 
 						# bzw. eine besseren als alle bisher bekannten. 
+						if not dest in NODE_DIST_ESTIMATES[successor]:
+							continue # Kein Weg von dort zum Ziel
 						dist_to_reach[successor] = dist_to_reach_successor
 						estimate_for_total_path = \
 							dist_to_reach_successor + NODE_DIST_ESTIMATES[successor][dest]
@@ -356,7 +360,7 @@ class State:
 		return False  # Suche fehlgeschlagen
 
 
-	def is_dead_end(self)
+	def is_dead_end(self):
 		""" Ob dieser Zwischenstand eine Sackgasse ist
 		
 			Die aufgeführten Tests ignorieren alle, dass sich Chilly bei seinen Wegen
@@ -370,11 +374,11 @@ class State:
 		eggs_left = len(self.eggs)
 		if (eggs_left == 0):
 			# Chilly muss heraus können. Mehr ist nicht zu testen
-			return not self.can_chilly_reach({ EXIT_LOC }):
+			return not self.can_chilly_reach({ EXIT_LOC })
 		
 		# Chilly muss jedes verbliebene Ei erreichen können.
 		for egg in self.eggs:
-			if not self.can_chilly_reach(EGG_SOURCES[egg])
+			if not self.can_chilly_reach(EGG_SOURCES[egg]):
 				return True
 				
 		# Eine Kopie, die ich modifizieren kann, ohne 'self' zu überschreiben
@@ -383,10 +387,10 @@ class State:
 		# Chilly muss von jedem verbliebenen Ei aus zum Ausgang können.
 		for egg in self.eggs:
 			copy.chilly_pos = EGG_DESTS[egg]
-			if not copy.can_chilly_reach({ EXIT_LOC })
+			if not copy.can_chilly_reach({ EXIT_LOC }):
 				return True
 		
-		if (eggs_left <= 1)
+		if (eggs_left <= 1):
 			# Mehr wüsste ich nicht, was getestet werden kann.
 			return False
 			
@@ -398,8 +402,8 @@ class State:
 		
 		# Bestimme die beiden Eier
 		(best_dist, best_pair) = (-1, None)
-		for egg1 in eggs:
-			for egg2 in eggs:
+		for egg1 in self.eggs:
+			for egg2 in self.eggs:
 				dist = EGG_DISTANCES[egg1][egg2]
 				if (dist > best_dist):
 					(best_dist, best_pair) = (dist, (egg1, egg2))
@@ -409,7 +413,7 @@ class State:
 		for (egg1, egg2) in [ best_pair, best_pair[::-1] ]:
 			for node in EGG_DESTS[egg1]:
 				copy.chilly_loc = node
-				if copy.can_chilly_reach(EGG_SOURCES[egg2])
+				if copy.can_chilly_reach(EGG_SOURCES[egg2]):
 					second_egg_reachable = True
 					break
 			if second_egg_reachable:
@@ -423,7 +427,7 @@ class SlideData:
 	dest: None # Zu welchem Haltepunkt die Kante führt
 	eggs: None # Eier, die auf dem Weg eingesammelt werden
 	
-	def __init__(dest, dir, eggs = set()):
+	def __init__(self, dest, dir, eggs = set()):
 		self.dest = dest
 		self.eggs = eggs
 
@@ -436,11 +440,11 @@ class SlideData:
 		""" Ausdruck des Objekts """
 		
 		print(f"SlideData(dest = {self.dest},")
-		print(f"         eggs = {self.eggs})")
+		print(f"          eggs = {self.eggs})")
 		
 ################################################################################
 
-def board_one_step(coo_x, coo_y, dir):
+def board_one_step(coo, dir):
 	""" Chilly 1 Feld weit in die übergebene Richtung ziehen
 		
 		dir - 	 Eine Richtung, in die Chilly gezogen werden soll
@@ -450,6 +454,7 @@ def board_one_step(coo_x, coo_y, dir):
 					eggs			- die hier liegenden Eier
 					do_halt 		- Ob ein Rutsch hiermit beendet ist
 	"""
+	(coo_x, coo_y) = coo
 	
 	# Chillys neuen Standort bestimmen
 	match dir:
@@ -476,25 +481,26 @@ def board_one_step(coo_x, coo_y, dir):
 	if BOARD[coo_x][coo_y]:
 		return None # Chilly kann nicht auf dieses Feld
 	
+	coo = (coo_x, coo_y)
 	eggs = set()
-	if (coo_x, coo_y) in EGGS
-		eggs += (coo_x, coo_y)
+	if coo in EGGS:
+		eggs.add(coo)
 	
-	if (self.chilly_loc) == EXIT_LOC:
-		return (coo_x, coo_y, eggs, True) # Endlage erreicht
+	if coo == EXIT_LOC:
+		return (coo, eggs, True) # Endlage erreicht
 	
 	# Chilly durchs Portal schicken, wenn er draufsteht
 	try:
-		(coo_x, coo_y) = PORTALS[(coo_x, coo_y)]
+		coo = PORTALS[coo]
 	except KeyError:
-		return (coo_x, coo_y, eggs, False)	# Kein Portal
+		return (coo, eggs, False)	# Kein Portal
 		
-	if (coo_x, coo_y) in EGGS
-		eggs += (coo_x, coo_y)
-	return (coo_x, coo_y, eggs, True) # Portalrutsch
+	if coo in EGGS:
+		eggs.add(coo)
+	return (coo, eggs, True) # Portalrutsch
 
 
-def board_slide(coo_x, coo_y, dir):
+def board_slide(coo, dir):
 	""" Chilly in die übergebene Richtung rutschen
 	
 		Chilly kommt dann also auf einem Haltepunkt zum Stehen.
@@ -504,23 +510,23 @@ def board_slide(coo_x, coo_y, dir):
 				 (coo_x, coo_y, collected), in allen anderen Fällen
 					- (coo_x, coo_y) - Chillys neuer Standort
 					- collected		 - Menge der eingesammelten Eier
-"""
+	"""
 		
-		# Erster Schritt
-		outcome = board_one_step(coo_x, coo_y, dir)
-		if outcome is None:
-			return None # Dieser Rutsch war nicht möglich
-		(coo_x, coo_y, collected , do_halt) = outcome
-		
-		# Weitere Schritte in die gleiche Richtung
-		while not do_halt:
-			outcome = board_one_step(coo_x, coo_y, dir)
-			if outcome is None: # geht nicht
-				break
-			(coo_x, coo_y, eggs, do_halt) = outcome
-			collected += eggs
-		
-		return (coo_x, coo_y, collected)
+	# Erster Schritt
+	outcome = board_one_step(coo, dir)
+	if outcome is None:
+		return None # Dieser Rutsch war nicht möglich
+	(coo, collected , do_halt) = outcome
+	
+	# Weitere Schritte in die gleiche Richtung
+	while not do_halt:
+		outcome = board_one_step(coo, dir)
+		if outcome is None: # geht nicht
+			break
+		(coo, eggs, do_halt) = outcome
+		collected.update(eggs)
+	
+	return (coo, collected)
 	
 
 def construct_graph():
@@ -538,6 +544,8 @@ def construct_graph():
 	# Anfangs bekannt ist der Zielpunkt des Spielbretts.
 	# Von dort aus geht es nur hinaus, es gibt also keine abgehenden Kanten
 	nodes = { EXIT_LOC: dict() }
+	egg_sources = dict()
+	egg_dests = dict()
 	
 	# Liste der Haltepunkte, die noch untersucht werden müssen
 	unexplored = [ CHILLY_LOC ]
@@ -549,22 +557,22 @@ def construct_graph():
 			
 		for dir in Dir:
 			# Auf dem Spielbrett in Richtung 'dir' rutschen
-			outcome = board_slide(*node, dir)
+			outcome = board_slide(node, dir)
 			if outcome is None:
 				continue # In diese Richtung kann nicht gerutscht werden
-			(coo_x, coo_y, eggs) = outcome
-			nodes[node][dir] = SlideData(dest = (coo_x, coo_y), eggs = eggs)
+			(dest, eggs) = outcome
+			nodes[node][dir] = SlideData(dest = dest, dir = dir, eggs = eggs)
 			if not dest in nodes:
 				# Neuer Haltepunkt gefunden. 
 				# Dieser Haltepunkt muss noch untersucht werden.
-				unexplored += dest
+				unexplored.append(dest)
 			for egg in eggs:
 				if not egg in egg_sources:
 					egg_sources[egg] = set()
-				egg_sources[egg] += dest
+				egg_sources[egg].add(dest)
 				if not egg in egg_dests:
 					egg_dests[egg] = set()
-				egg_dests[egg] += dest
+				egg_dests[egg].add(dest)
 				
 	return (nodes, egg_sources, egg_dests)
 
@@ -599,7 +607,7 @@ def dijkstra(start):
 		# Entfernung vom Startpunkt, wenn wir über den aktuellen 
 		# Haltepunkt zu einem seiner Nachfolger gehen 
 		new_distance = current_distance + 1
-		for edge_data in NODES[current_node]:
+		for edge_data in NODES[current_node].values():
 			successor = edge_data.dest
 			if new_distance < node_distances[successor]:
 				# Aktualisiere die bekannte kürzeste Entfernung
@@ -607,10 +615,10 @@ def dijkstra(start):
 				# Diesen Nachfolger müssen wir noch untersuchen
 				heappush(unexplored, (new_distance, successor))
 	
-	return node_distances
+	
+	return { key: v for key, v in node_distances.items() if v != float('inf') }
 
-
-def calc_dist_estimates()
+def calc_dist_estimates():
 	""" Schätzwerte für den Abstand zu Haltepunkten und Eiern berechnen
 	
 		Die Schätzwerte wären exakt ohne dasjenige, was sich Chilly 
@@ -619,7 +627,7 @@ def calc_dist_estimates()
 	
 	node_dist_estimates = dict()
 	
-	for node in NODES
+	for node in NODES:
 		node_dist_estimates[node] = dijkstra(node)
 	return node_dist_estimates
 
@@ -638,7 +646,7 @@ def calc_egg_distances():
 			best_dist = float('inf')
 			for node_from in EGG_DESTS[egg_from]:
 				for node_to in EGG_SOURCES[egg_to]:
-					if NODE_DIST_ESTIMATES[node_from][node_to] < best_dist:
+					if NODE_DIST_ESTIMATES[node_from].get(node_to, float('inf')) < best_dist:
 						best_dist = NODE_DIST_ESTIMATES[node_from][node_to]
 			egg_dists[egg_from][egg_to] = best_dist
 			
@@ -763,10 +771,10 @@ init_game3()	# Level 3
 
 (NODES, EGG_SOURCES, EGG_DESTS) = construct_graph()
 print_board(EGGS, CHILLY_LOC)
-breakpoint()
 
 NODE_DIST_ESTIMATES = calc_dist_estimates()
 EGG_DISTANCES = calc_egg_distances()
+breakpoint()
 
 SOLUTION = search_solution()
 
